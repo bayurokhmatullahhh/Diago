@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.notification import Notification
-from app.models.todo import Todo, TodoStatus, utcnow
+from app.models.project import Project
+from app.models.todo import Todo, TodoPriority, TodoStatus, utcnow
 from app.schemas.todo import TodoCreate, TodoResponse, TodoUpdate
 
 router = APIRouter(prefix="/api/todos", tags=["todos"])
@@ -21,11 +22,26 @@ def _database_datetime(value: datetime | None) -> datetime | None:
 @router.get("", response_model=list[TodoResponse], summary="List personal tasks")
 def list_todos(
     status_filter: TodoStatus | None = Query(default=None, alias="status"),
+    project_id: int | None = Query(default=None, ge=1),
+    priority: TodoPriority | None = None,
+    q: str | None = Query(default=None, max_length=100),
     db: Session = Depends(get_db),
 ) -> list[Todo]:
     statement = select(Todo)
     if status_filter is not None:
         statement = statement.where(Todo.status == status_filter)
+    if project_id is not None:
+        statement = statement.where(Todo.project_id == project_id)
+    if priority is not None:
+        statement = statement.where(Todo.priority == priority)
+    if q and q.strip():
+        term = q.strip()
+        statement = statement.where(
+            or_(
+                Todo.title.icontains(term, autoescape=True),
+                Todo.notes.icontains(term, autoescape=True),
+            )
+        )
     statement = statement.order_by(Todo.due_at.is_(None), Todo.due_at, Todo.created_at.desc())
     return list(db.scalars(statement).all())
 
@@ -37,9 +53,13 @@ def list_todos(
     summary="Create a personal task",
 )
 def create_todo(payload: TodoCreate, db: Session = Depends(get_db)) -> Todo:
+    if payload.project_id is not None and db.get(Project, payload.project_id) is None:
+        raise HTTPException(status_code=404, detail="Project tidak ditemukan")
     todo = Todo(
         title=payload.title,
         notes=payload.notes,
+        project_id=payload.project_id,
+        priority=payload.priority,
         due_at=_database_datetime(payload.due_at),
         reminder_at=_database_datetime(payload.reminder_at),
         reminder_revision=1 if payload.reminder_at is not None else 0,
@@ -59,6 +79,8 @@ def update_todo(
         raise HTTPException(status_code=404, detail="Tugas tidak ditemukan")
 
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("project_id") is not None and db.get(Project, changes["project_id"]) is None:
+        raise HTTPException(status_code=404, detail="Project tidak ditemukan")
     for field, value in changes.items():
         if field in {"due_at", "reminder_at"}:
             value = _database_datetime(value)

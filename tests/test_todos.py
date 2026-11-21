@@ -91,3 +91,55 @@ def test_reminder_can_be_rescheduled_or_cleared(client):
         f"/api/todos/{created['id']}", json={"reminder_at": None}
     ).json()
     assert cleared["reminder_at"] is None
+
+
+def test_projects_group_tasks_and_support_search_and_filters(client):
+    project = client.post(
+        "/api/projects",
+        json={"name": "  Website  ", "description": "  Refresh landing page  "},
+    )
+    assert project.status_code == 201
+    project_data = project.json()
+    assert project_data["name"] == "Website"
+    assert project_data["description"] == "Refresh landing page"
+
+    task = client.post(
+        "/api/todos",
+        json={
+            "title": "Review hero copy",
+            "notes": "Check the landing page",
+            "project_id": project_data["id"],
+            "priority": "high",
+        },
+    )
+    assert task.status_code == 201
+    assert task.json()["project_id"] == project_data["id"]
+    assert task.json()["priority"] == "high"
+    filtered = client.get(
+        f"/api/todos?project_id={project_data['id']}&priority=high&q=landing"
+    ).json()
+    assert filtered[0]["id"] == task.json()["id"]
+    assert client.get(f"/api/todos?project_id={project_data['id']}&q=missing").json() == []
+    missing_project = client.patch(
+        f"/api/todos/{task.json()['id']}", json={"project_id": 999}
+    )
+    assert missing_project.status_code == 404
+
+    deleted = client.delete(f"/api/projects/{project_data['id']}")
+    assert deleted.status_code == 204
+    remaining = client.get("/api/todos").json()
+    assert remaining[0]["project_id"] is None
+    assert remaining[0]["priority"] == "high"
+
+
+def test_project_name_validation_and_conflict(client):
+    assert client.post("/api/projects", json={"name": "  "}).status_code == 422
+    created = client.post("/api/projects", json={"name": "Work"})
+    assert created.status_code == 201
+    renamed = client.patch(
+        f"/api/projects/{created.json()['id']}", json={"name": "Renamed"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Renamed"
+    assert client.post("/api/projects", json={"name": "Renamed"}).status_code == 409
+    assert client.patch("/api/projects/999", json={"name": "Missing"}).status_code == 404

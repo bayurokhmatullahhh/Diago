@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, String, Text, text
+from sqlalchemy import DateTime, Enum, ForeignKey, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -16,6 +16,12 @@ class TodoStatus(str, enum.Enum):
     COMPLETED = "completed"
 
 
+class TodoPriority(str, enum.Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+
+
 class Todo(Base):
     """A personal task with an optional due date and reminder time."""
 
@@ -24,6 +30,19 @@ class Todo(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    priority: Mapped[TodoPriority] = mapped_column(
+        Enum(
+            TodoPriority,
+            name="todo_priority",
+            values_callable=lambda priority: [item.value for item in priority],
+        ),
+        default=TodoPriority.NORMAL,
+        server_default=text("'normal'"),
+        index=True,
+    )
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reminder_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reminder_revision: Mapped[int] = mapped_column(default=0, server_default=text("0"))

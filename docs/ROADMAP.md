@@ -34,13 +34,18 @@ beban mengatur hal-hal sehari-hari.
 
 MVP saat ini adalah web app lokal dengan backend FastAPI, SQLite, SQLAlchemy,
 dan frontend React/Vite. Pengguna dapat membuat, mengubah, menghapus,
-menyelesaikan, dan memfilter tugas, menambahkan catatan dan waktu, serta melihat
+menyelesaikan, dan memfilter tugas, mengelompokkan tugas ke project, menentukan
+prioritas, mencari nama/catatan, menambahkan catatan dan waktu, serta melihat
 jumlah tugas yang aktif atau terlambat.
 
 Yang sudah ada:
 
 - API `GET`, `POST`, `PATCH`, dan `DELETE` untuk `/api/todos`, pengingat
   persisten, inbox notifikasi, serta worker lokal.
+- API CRUD project; todo mendukung project dan prioritas rendah/normal/tinggi.
+  UI menyediakan pencarian serta filter project, prioritas, status, dan tenggat.
+- Migrasi menambahkan prioritas normal untuk tugas lama; penghapusan project
+  mempertahankan tugas dan melepaskan pengelompokannya.
 - AI task planner multi-provider dengan alur draft dan konfirmasi.
 - Coding-agent MVP untuk mengusulkan perubahan satu file, menampilkan diff,
   lalu menunggu persetujuan sebelum menerapkan.
@@ -171,14 +176,16 @@ multi-worker untuk deployment terdistribusi.
 
 ### Fase 3 — AI sebagai penyusun rencana, bukan pelaksana bebas
 
-**Status: task draft dan chat multi-turn dengan satu tool terbatas tersedia;
-perlu konfigurasi provider untuk pemakaian AI nyata.**
+**Status: task draft, chat multi-turn, tool proposal dengan approval, riwayat
+chat lokal, dan log status aksi dasar tersedia; perlu konfigurasi provider
+untuk pemakaian AI nyata.**
 
 - UI menerima instruksi bahasa alami dan menampilkan draft yang bisa diedit.
-- UI chat mempertahankan percakapan sementara di browser dan mengirim paling
-  banyak 16 pesan terakhir ke provider.
-- Tool chat yang tersedia hanya proposal pembuatan todo; penyimpanan tetap
-  menunggu konfirmasi eksplisit pengguna.
+- UI menyimpan percakapan dan hasil tool di SQLite; pengguna dapat membuka dan
+  menghapus riwayat dari sidebar.
+- Chat dapat mengusulkan todo, riset publik, atau scan keamanan lokal. Status
+  aksi proposal dicatat sebagai menunggu, disetujui/ditolak, selesai, atau gagal.
+- Paling banyak 16 pesan terakhir dikirim ke provider untuk tiap respons.
 - Adapter OpenAI, Gemini, Anthropic, dan OpenAI-compatible/local.
 - Provider default dicoba dulu, lalu provider fallback yang tersedia.
 - Backend meminta JSON terstruktur dengan tanggal lokal/timezone dan pertanyaan
@@ -188,12 +195,13 @@ perlu konfigurasi provider untuk pemakaian AI nyata.**
 - API status provider tidak mengembalikan API keys; tes adapter memakai HTTP
   mock, sehingga tidak memakai token atau koneksi provider sungguhan.
 
-**Batas MVP:** belum ada streaming, memori chat persisten, registry tool umum,
-manajemen API key dari UI, atau credential encryption/secret manager. Chat
-tidak punya akses shell, browser, atau jaringan umum. Pesan dan riwayat yang
-dikirim ke provider dapat berisi data sensitif, jadi pengguna perlu
-memperhatikan kebijakan provider. Konfigurasi key dan model dilakukan melalui
-`.env` backend.
+**Batas MVP:** riwayat tersimpan lokal tanpa enkripsi; tidak ada autentikasi,
+multi-user isolation, backup otomatis, streaming, registry tool umum,
+manajemen API key dari UI, atau credential encryption/secret manager. Log aksi
+belum mencakup semua operasi Coding/Security di luar aksi chat. Chat tidak
+punya akses shell, browser, atau jaringan umum. Pesan yang dikirim ke provider
+dapat berisi data sensitif; perhatikan kebijakan provider. Konfigurasi key dan
+model dilakukan melalui `.env` backend.
 
 ### Fase 4 — Fondasi agent dan kontrol tindakan
 
@@ -214,7 +222,7 @@ fondasi agent penuh masih direncanakan.**
   mengeksekusi kode, mengakses jaringan, atau mengirim source ke provider.
 - Hasil pemeriksaan statis adalah petunjuk untuk review manual, bukan bukti
   kerentanan atau jaminan keamanan.
-- Belum ada registry tool umum, agent run lengkap, audit trail penuh,
+- Belum ada registry tool umum, agent run lengkap, audit trail menyeluruh,
   pembatalan, atau autentikasi.
 
 **Kriteria selesai:** agent hanya dapat memakai tool yang terdaftar, input
@@ -255,16 +263,20 @@ bukan sekadar banyaknya fitur.
 
 Sebelum memperluas kemampuan, urutan implementasi berikut direkomendasikan:
 
-1. **Validasi alur coding-agent di UI:** uji proposal, review diff, reject,
-   approve, deteksi file stale, dan konfirmasi menjalankan tests.
-2. **Coba provider sungguhan dengan source non-sensitif:** pastikan consent,
+1. **Organisasi kerja:** tambahkan project, prioritas, pencarian, dan filter
+   tugas agar workspace berguna untuk pekerjaan harian.
+2. **Validasi alur UI:** uji riwayat chat, transisi approval aksi, coding
+   proposal, review diff, reject/approve, dan deteksi file stale.
+3. **Konteks project read-only:** bantu agent menemukan source relevan secara
+   lokal tanpa eksekusi kode; perubahan tetap berupa proposal yang direview.
+4. **Coba provider sungguhan dengan source non-sensitif:** pastikan consent,
    biaya, fallback, serta penanganan error dipahami sebelum dipakai rutin.
-3. **Tingkatkan pemeriksaan defensif repo ini:** validasi temuan heuristik dan
+5. **Tingkatkan pemeriksaan defensif repo ini:** validasi temuan heuristik dan
    rancang pemeriksaan dependency dengan sumber advisori yang tepercaya.
-4. **Analisis website dengan izin:** tentukan domain yang dimiliki/diizinkan dan
+6. **Analisis website dengan izin:** tentukan domain yang dimiliki/diizinkan dan
    batasi analisis awal ke halaman read-only sebelum menambah kemampuan lain.
-5. **Tentukan keamanan sebelum deployment:** implementasikan authentication,
-   authorization, pembatasan jaringan, dan isolasi data sebelum akses multi-user.
+7. **Kesiapan deployment:** backup/restore, authentication, authorization,
+   pembatasan jaringan, dan isolasi data harus selesai sebelum akses multi-user.
 
 Ini menjaga ruang lingkup tetap kecil: belum ada akses email, browser agent,
 pembelian, pengiriman pesan otomatis, atau tindakan lain atas nama pengguna.

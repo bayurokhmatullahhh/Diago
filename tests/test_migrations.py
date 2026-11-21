@@ -27,8 +27,16 @@ def test_migration_creates_schema_for_new_database(tmp_path):
     try:
         inspector = inspect(engine)
         columns = {column["name"] for column in inspector.get_columns("todos")}
-        assert {"reminder_at", "reminder_revision", "reminder_sent_at"} <= columns
+        assert {
+            "reminder_at",
+            "reminder_revision",
+            "reminder_sent_at",
+            "project_id",
+            "priority",
+        } <= columns
         assert "notifications" in inspector.get_table_names()
+        assert "projects" in inspector.get_table_names()
+        assert {"chat_conversations", "agent_actions"} <= set(inspector.get_table_names())
     finally:
         engine.dispose()
 
@@ -62,9 +70,10 @@ def test_migration_preserves_existing_todos(tmp_path):
     try:
         with engine.connect() as connection:
             row = connection.execute(
-                text("SELECT title, reminder_revision FROM todos WHERE id = 1")
+                text("SELECT title, reminder_revision, priority FROM todos WHERE id = 1")
             ).one()
-            assert row == ("Existing task", 0)
+            assert row == ("Existing task", 0, "normal")
+            assert inspect(connection).get_foreign_keys("todos")[0]["referred_table"] == "projects"
             assert "notifications" in inspect(connection).get_table_names()
     finally:
         engine.dispose()

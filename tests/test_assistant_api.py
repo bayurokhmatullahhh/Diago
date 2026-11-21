@@ -4,6 +4,7 @@ from app.api.routes import assistant as assistant_routes
 from app.core.config import Settings, get_settings
 from app.main import create_app
 from app.models.todo import Todo
+from app.schemas.agent import WebResearchCitation, WebResearchResponse
 from app.schemas.assistant import AssistantChatContent, PlanDraft
 
 
@@ -165,7 +166,175 @@ def test_chat_endpoint_returns_tool_proposal_without_running_it(client, monkeypa
     assert response.status_code == 200
     assert response.json()["tool_proposal"]["tool_id"] == "public_web_research"
     assert response.json()["tool_proposal"]["query"] == "informasi publik terbaru"
+    assert response.json()["action_id"]
     assert calls == []
+
+
+def test_chat_history_can_be_resumed_and_deleted(client, monkeypatch):
+    seen_messages = []
+
+    def fake_chat(messages, timezone_name, configured_settings):
+        seen_messages.append([message.content for message in messages])
+        return (
+            AssistantChatContent(reply=f"Balasan {len(seen_messages)}"),
+            "openai",
+            "test-model",
+        )
+
+    monkeypatch.setattr(assistant_routes, "create_chat_response", fake_chat)
+    first = client.post(
+        "/api/assistant/chat",
+        json={"messages": [{"role": "user", "content": "Mulai pembahasan"}]},
+    )
+    conversation_id = first.json()["conversation_id"]
+    second = client.post(
+        "/api/assistant/chat",
+        json={
+            "conversation_id": conversation_id,
+            "messages": [
+                {"role": "assistant", "content": "Riwayat palsu dari browser"},
+                {"role": "user", "content": "Lanjutkan pembahasan"},
+            ],
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert seen_messages == [
+        ["Mulai pembahasan"],
+        ["Mulai pembahasan", "Balasan 1", "Lanjutkan pembahasan"],
+    ]
+
+    listed = client.get("/api/assistant/conversations")
+    assert listed.status_code == 200
+    assert listed.json()[0]["id"] == conversation_id
+    assert listed.json()[0]["message_count"] == 4
+    detail = client.get(f"/api/assistant/conversations/{conversation_id}")
+    assert [message["content"] for message in detail.json()["messages"]] == [
+        "Mulai pembahasan",
+        "Balasan 1",
+        "Lanjutkan pembahasan",
+        "Balasan 2",
+    ]
+
+    deleted = client.delete(f"/api/assistant/conversations/{conversation_id}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/assistant/conversations/{conversation_id}").status_code == 404
+
+
+def test_agent_action_status_requires_approval_and_records_completion(client, monkeypatch):
+    def fake_chat(messages, timezone_name, configured_settings):
+        return (
+            AssistantChatContent(
+                reply="Aku bisa mencari sumber setelah persetujuanmu.",
+                tool_proposal={
+                    "tool_id": "public_web_research",
+                    "reason": "Butuh informasi publik terbaru.",
+                    "query": "informasi publik terbaru",
+                },
+            ),
+            "gemini",
+            "test-model",
+        )
+
+    monkeypatch.setattr(assistant_routes, "create_chat_response", fake_chat)
+    response = client.post(
+        "/api/assistant/chat",
+        json={"messages": [{"role": "user", "content": "Cari sumber terbaru"}]},
+    ).json()
+    conversation_id = response["conversation_id"]
+    action_id = response["action_id"]
+    action_url = f"/api/assistant/conversations/{conversation_id}/actions/{action_id}"
+
+    assert client.patch(
+        action_url,
+        json={"status": "completed", "summary": "Selesai"},
+    ).status_code == 409
+    assert client.patch(action_url, json={"status": "approved"}).json()["status"] == "approved"
+    completed = client.patch(
+        action_url,
+        json={"status": "completed", "summary": "Riset selesai"},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["summary"] == "Riset selesai"
+    assert client.patch(action_url, json={"status": "rejected"}).status_code == 409
+
+
+def test_chat_tool_proposal_blocks_follow_up_until_user_decides(client, monkeypatch):
+    calls = []
+
+    def fake_chat(messages, timezone_name, configured_settings):
+        calls.append(messages)
+        return (
+            AssistantChatContent(
+                reply="Aku bisa mencari sumber setelah persetujuanmu.",
+                tool_proposal={
+                    "tool_id": "public_web_research",
+                    "reason": "Butuh informasi publik terbaru.",
+                    "query": "informasi publik terbaru",
+                },
+            ),
+            "gemini",
+            "test-model",
+        )
+
+    monkeypatch.setattr(assistant_routes, "create_chat_response", fake_chat)
+    first = client.post(
+        "/api/assistant/chat",
+        json={"messages": [{"role": "user", "content": "Cari sumber terbaru"}]},
+    ).json()
+    blocked = client.post(
+        "/api/assistant/chat",
+        json={
+            "conversation_id": first["conversation_id"],
+            "messages": [{"role": "user", "content": "Lanjut"}],
+        },
+    )
+
+    assert blocked.status_code == 409
+    assert len(calls) == 1
+
+
+def test_direct_tool_action_is_audited_and_tool_results_are_saved(client):
+    conversation = client.post(
+        "/api/assistant/conversations",
+        json={"first_message": "Cari informasi kampus"},
+    ).json()
+    action = client.post(
+        f"/api/assistant/conversations/{conversation['id']}/actions",
+        json={
+            "action_type": "public_web_research",
+            "summary": "Riset web publik yang diminta pengguna.",
+            "query": "Politeknik Negeri Indramayu",
+        },
+    )
+    assert action.status_code == 201
+    assert action.json()["status"] == "approved"
+
+    result_message = client.post(
+        f"/api/assistant/conversations/{conversation['id']}/messages",
+        json={
+            "role": "assistant",
+            "content": "Ringkasan riset.",
+            "web_research": {
+                "answer": "Ringkasan riset.",
+                "citations": [{"title": "Sumber", "url": "https://example.com"}],
+                "provider": "gemini",
+                "model": "test-model",
+            },
+        },
+    )
+    assert result_message.status_code == 201
+    assert result_message.json()["web_research"]["citations"][0]["url"] == "https://example.com/"
+
+    completed = client.patch(
+        f"/api/assistant/conversations/{conversation['id']}/actions/{action.json()['id']}",
+        json={"status": "completed", "summary": "Riset berhasil."},
+    )
+    assert completed.status_code == 200
+    detail = client.get(f"/api/assistant/conversations/{conversation['id']}").json()
+    assert detail["actions"][0]["status"] == "completed"
+    assert detail["messages"][-1]["web_research"]["answer"] == "Ringkasan riset."
 
 
 def test_chat_endpoint_validates_history(client):

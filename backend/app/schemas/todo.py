@@ -9,7 +9,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.models.todo import TodoStatus
+from app.models.todo import TodoPriority, TodoStatus
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -27,6 +27,8 @@ def _require_timezone(value: datetime | None) -> datetime | None:
 class TodoCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = Field(default=None, max_length=5000)
+    project_id: int | None = Field(default=None, ge=1)
+    priority: TodoPriority = TodoPriority.NORMAL
     due_at: datetime | None = None
     reminder_at: datetime | None = None
 
@@ -51,6 +53,8 @@ class TodoCreate(BaseModel):
 class TodoUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = Field(default=None, max_length=5000)
+    project_id: int | None = Field(default=None, ge=1)
+    priority: TodoPriority | None = None
     due_at: datetime | None = None
     reminder_at: datetime | None = None
     status: TodoStatus | None = None
@@ -80,6 +84,8 @@ class TodoUpdate(BaseModel):
             raise ValueError("Judul tidak boleh null")
         if "status" in self.model_fields_set and self.status is None:
             raise ValueError("Status tidak boleh null")
+        if "priority" in self.model_fields_set and self.priority is None:
+            raise ValueError("Prioritas tidak boleh null")
         return self
 
 
@@ -89,6 +95,8 @@ class TodoResponse(BaseModel):
     id: int
     title: str
     notes: str | None
+    project_id: int | None
+    priority: TodoPriority
     due_at: datetime | None
     reminder_at: datetime | None
     reminder_sent_at: datetime | None

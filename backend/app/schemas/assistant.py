@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
+from app.schemas.agent import SecurityScanResponse, WebResearchResponse
 
 class DraftRequest(BaseModel):
     instruction: str = Field(min_length=3, max_length=4000)
@@ -88,6 +89,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=16)
     timezone: str = Field(default="Asia/Jakarta", max_length=100)
+    conversation_id: str | None = Field(default=None, min_length=36, max_length=36)
 
     @field_validator("timezone")
     @classmethod
@@ -157,7 +159,119 @@ class AssistantChatResponse(BaseModel):
     tool_proposal: AssistantToolProposal | None = None
     provider: str
     model: str
+    conversation_id: str
+    action_id: str | None = None
 
+
+class AgentActionResponse(BaseModel):
+    id: str
+    action_type: str
+    status: Literal["pending", "approved", "rejected", "completed", "failed"]
+    summary: str
+    details: dict
+    created_at: datetime
+    updated_at: datetime
+    approved_at: datetime | None
+    completed_at: datetime | None
+
+    @field_serializer("created_at", "updated_at", "approved_at", "completed_at")
+    def serialize_action_datetimes(self, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class StoredChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+    todo_proposal: PlanDraft | None = None
+    tool_proposal: AssistantToolProposal | None = None
+    action_id: str | None = None
+    security_scan: SecurityScanResponse | None = None
+    web_research: WebResearchResponse | None = None
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class ConversationSummary(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    last_message: str
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_conversation_datetimes(self, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class ConversationDetail(ConversationSummary):
+    messages: list[StoredChatMessage]
+    actions: list[AgentActionResponse]
+
+
+class AgentActionUpdate(BaseModel):
+    status: Literal["approved", "rejected", "completed", "failed"]
+    summary: str | None = Field(default=None, max_length=1000)
+
+
+class AgentActionCreate(BaseModel):
+    action_type: Literal["public_web_research", "local_security_scan"]
+    summary: str = Field(min_length=1, max_length=1000)
+    query: str | None = Field(default=None, min_length=3, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_action_input(self) -> "AgentActionCreate":
+        if self.action_type == "public_web_research" and not self.query:
+            raise ValueError("Riset web memerlukan query")
+        if self.action_type == "local_security_scan" and self.query is not None:
+            raise ValueError("Scan lokal tidak menerima query")
+        return self
+
+
+class ConversationMessageCreate(BaseModel):
+    role: Literal["user", "assistant"] = "assistant"
+    content: str = Field(min_length=1, max_length=6000)
+    security_scan: SecurityScanResponse | None = None
+    web_research: WebResearchResponse | None = None
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Isi pesan tidak boleh kosong")
+        return value
+
+    @model_validator(mode="after")
+    def attachments_require_assistant_message(self) -> "ConversationMessageCreate":
+        if self.role == "user" and (
+            self.security_scan is not None or self.web_research is not None
+        ):
+            raise ValueError("Lampiran tool hanya dapat disimpan pada pesan assistant.")
+        return self
+
+
+class ConversationCreate(BaseModel):
+    first_message: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("first_message")
+    @classmethod
+    def first_message_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Pesan awal tidak boleh kosong")
+        return value
 
 class ProviderStatus(BaseModel):
     id: str

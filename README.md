@@ -7,14 +7,16 @@ together around one agent entry point, with a FastAPI backend and React web app.
 ## Current MVP
 
 - One Agent workspace with task, coding, and local Security tools in a shared navigation shell.
-- Create, edit, complete, filter, and delete personal tasks.
+- Create, edit, complete, filter, and delete personal tasks; organize them into projects and assign low, normal, or high priority.
+- Search tasks by title/notes and filter by project, priority, status, and due-date state.
 - Add optional notes, a due date, and a separate reminder time.
 - Review active, overdue, and completed task counts.
 - Persist due reminders in an in-app notification inbox.
 - Optionally receive browser notifications when the web app is open and permission is granted.
 - Generate task drafts from natural-language instructions using configurable AI providers.
 - Review/edit the proposed task; save only after explicit confirmation.
-- Chat with the configured provider using recent conversation context; it can propose a todo, public-web research, or a local security scan, and waits for user approval before any action runs.
+- Chat with the configured provider; conversations are saved in local SQLite and can be reopened or deleted.
+- Track proposed tool/todo actions and their approval, rejection, completion, or failure state in each conversation.
 - Run an explicit public-web research query through Gemini Google Search grounding and show source links; the query is sent to Google/Gemini.
 - Propose a change to one eligible workspace source file, review its diff, then explicitly apply or reject it.
 - Run the fixed backend test command only after a separate confirmation.
@@ -22,6 +24,7 @@ together around one agent entry point, with a FastAPI backend and React web app.
 - Run a manually approved, passive HTTPS/TLS and security-header check against an explicitly allowlisted domain and URL path.
 - Run a manually approved dependency advisory lookup for npm and PyPI packages.
 - Persist tasks in SQLite by default.
+- Keep existing tasks when upgrading to the projects/priority schema; deleting a project leaves its tasks intact and ungrouped.
 
 The current app version is `0.3.0` (local preview). The release roadmap and
 planned capability gates are documented in [docs/ROADMAP.md](./docs/ROADMAP.md).
@@ -140,16 +143,21 @@ sending it to that provider.
 
 ## Assistant chat
 
-The assistant chat supports multi-turn conversation in the current browser
-session. Up to the last 16 messages (maximum 16,000 characters total) are sent
-to the configured provider for each response; chat history is not persisted by
-the backend. Chat may suggest a todo, public-web research, or a read-only local
-security scan. Suggestions do not execute automatically: the user must approve
-them in the UI, and public research displays its query before sending it to
-Google/Gemini. Todo proposals are not saved until confirmed. The assistant has
-no shell, arbitrary browser, or unrestricted tool access. Do not send sensitive
-information in chat because prompts and recent history go to the configured AI
-provider.
+Chat conversations and tool results are stored in the local SQLite database.
+Use the sidebar to reopen or delete conversations; deleting a conversation also
+deletes its action history. Tool/todo proposals are recorded with their current
+approval state. Only the last 16 messages (maximum 16,000 characters total) are
+sent to the configured provider for a response. Chat may suggest a todo,
+public-web research, or a read-only local security scan. Suggestions do not
+execute automatically: the user must approve them in the UI, and public
+research displays its query before sending it to Google/Gemini. Todo proposals
+are not saved until confirmed. The assistant has no shell, arbitrary browser,
+or unrestricted tool access. Do not send sensitive information in chat because
+prompts and recent history go to the configured AI provider.
+
+Conversation history is not encrypted and this MVP has no authentication or
+multi-user isolation. Keep the backend on the local machine and do not expose
+it to a network or the public internet.
 
 ## Coding agent (local MVP)
 
@@ -209,7 +217,13 @@ before upgrading packages.
 ## API
 
 - `GET /api/assistant/providers` — provider names, models, and configured status (never API keys)
-- `POST /api/assistant/chat` — multi-turn response with an optional, uncommitted todo or approved-tool proposal
+- `POST /api/assistant/chat` — multi-turn response with an optional todo/tool proposal; accepts an optional conversation ID
+- `GET /api/assistant/conversations` — list saved local conversations
+- `POST /api/assistant/conversations` — create a conversation for an explicit chat tool action
+- `GET /api/assistant/conversations/{id}` — read messages and action history
+- `POST /api/assistant/conversations/{id}/messages` — append a chat/tool result
+- `PATCH /api/assistant/conversations/{id}/actions/{action_id}` — record approval, rejection, completion, or failure
+- `DELETE /api/assistant/conversations/{id}` — delete a conversation and its action history
 - `POST /api/assistant/drafts` — create a reviewable AI task draft; does not persist it
 - `POST /api/agent/research` — explicit public web research through Gemini Google Search grounding with source citations
 - `POST /api/agent/security-scan` — run local read-only pattern checks on project source/configuration

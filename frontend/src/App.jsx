@@ -61,7 +61,7 @@ function parseWebsiteTarget(value) {
   const input = value.trim();
   const scheme = input.match(/^([a-z][a-z\d+.-]*):\/\//i)?.[1]?.toLowerCase();
   if (scheme && scheme !== "https") {
-    throw new Error("Gunakan URL HTTPS untuk pemeriksaan website.");
+    throw new Error("Gunakan URL HTTPS publik");
   }
   let url;
   try {
@@ -93,7 +93,14 @@ function pageFromHash() {
   return WORKSPACE_PAGES.has(page) ? page : "chat";
 }
 
-const initialForm = { title: "", notes: "", due_at: "", reminder_at: "" };
+const initialForm = {
+  title: "",
+  notes: "",
+  due_at: "",
+  reminder_at: "",
+  project_id: "",
+  priority: "normal",
+};
 const emptyDraft = {
   status: "ready",
   title: "",
@@ -106,9 +113,21 @@ const initialChatMessages = [];
 
 export default function App() {
   const [todos, setTodos] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectSaving, setProjectSaving] = useState(false);
+  const [taskSearch, setTaskSearch] = useState("");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState("all");
+  const [dueFilter, setDueFilter] = useState("all");
   const [activePage, setActivePage] = useState(pageFromHash);
   const [providerStatus, setProviderStatus] = useState(null);
   const [chatMessages, setChatMessages] = useState(initialChatMessages);
+  const [chatConversations, setChatConversations] = useState([]);
+  const [chatActions, setChatActions] = useState([]);
+  const [activeChatId, setActiveChatId] = useState(null);
+  const [chatActionId, setChatActionId] = useState(null);
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatActionLoading, setChatActionLoading] = useState(false);
@@ -165,6 +184,63 @@ export default function App() {
     }
   }
 
+  async function refreshProjects() {
+    try {
+      setProjects(await request("/api/projects"));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function createProject(event) {
+    event.preventDefault();
+    setProjectSaving(true);
+    setError("");
+    try {
+      const project = await request("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ name: newProjectName }),
+      });
+      setNewProjectName("");
+      setNotice(`Project "${project.name}" dibuat.`);
+      await refreshProjects();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setProjectSaving(false);
+    }
+  }
+
+  async function renameProject(project) {
+    const name = window.prompt("Nama project baru:", project.name);
+    if (name === null || name.trim() === project.name) return;
+    try {
+      await request(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      });
+      await refreshProjects();
+      setNotice("Nama project diperbarui.");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function deleteProject(project) {
+    if (!window.confirm(`Hapus project "${project.name}"? Tugasnya tetap ada tanpa project.`)) return;
+    try {
+      await request(`/api/projects/${project.id}`, { method: "DELETE" });
+      if (form.project_id === String(project.id)) {
+        setForm((current) => ({ ...current, project_id: "" }));
+      }
+      if (projectFilter === String(project.id)) setProjectFilter("all");
+      await Promise.all([refreshProjects(), refreshTodos()]);
+      setNotice("Project dihapus; tugasnya tetap tersimpan.");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   async function refreshNotifications() {
     try {
       const data = await request("/api/notifications");
@@ -207,10 +283,131 @@ export default function App() {
     }
   }
 
+  async function refreshChatConversations() {
+    try {
+      setChatConversations(await request("/api/assistant/conversations"));
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function refreshActiveChatActions(conversationId = activeChatId) {
+    if (!conversationId) return;
+    try {
+      const conversation = await request(`/api/assistant/conversations/${conversationId}`);
+      setChatActions(conversation.actions);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function createChatConversation(firstMessage) {
+    const conversation = await request("/api/assistant/conversations", {
+      method: "POST",
+      body: JSON.stringify({ first_message: firstMessage }),
+    });
+    setActiveChatId(conversation.id);
+    setChatMessages(conversation.messages);
+    await refreshChatConversations();
+    return conversation.id;
+  }
+
+  async function ensureChatConversation(userMessage) {
+    if (!activeChatId) return createChatConversation(userMessage);
+    await request(`/api/assistant/conversations/${activeChatId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content: userMessage }),
+    });
+    return activeChatId;
+  }
+
+  async function persistAssistantMessage(content, attachments = {}, conversationId = activeChatId) {
+    if (!conversationId) return;
+    try {
+      await request(`/api/assistant/conversations/${conversationId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ role: "assistant", content, ...attachments }),
+      });
+      await refreshChatConversations();
+    } catch (err) {
+      setError(`Hasil tool berjalan, tetapi riwayat gagal disimpan: ${err.message}`);
+    }
+  }
+
+  async function recordAgentAction(conversationId, actionType, summary, query) {
+    const action = await request(`/api/assistant/conversations/${conversationId}/actions`, {
+      method: "POST",
+      body: JSON.stringify({
+        action_type: actionType,
+        summary,
+        ...(query ? { query } : {}),
+      }),
+    });
+    setChatActions((actions) => [...actions, action]);
+    await refreshChatConversations();
+    return action.id;
+  }
+
+  async function openChatConversation(conversationId) {
+    if (chatLoading || chatActionLoading || chatToolLoading || chatHistoryLoading) return;
+    setChatHistoryLoading(true);
+    setError("");
+    try {
+      const conversation = await request(`/api/assistant/conversations/${conversationId}`);
+      setActiveChatId(conversation.id);
+      setChatMessages(conversation.messages.map((message) => ({
+        ...message,
+        securityScan: message.security_scan,
+        webResearch: message.web_research,
+      })));
+      setChatActions(conversation.actions);
+      const pendingAction = conversation.actions.find((action) => action.status === "pending");
+      setChatActionId(pendingAction?.id || null);
+      setChatToolProposal(pendingAction?.details?.tool_proposal || null);
+      setChatTodoProposal(pendingAction?.details?.todo_proposal || null);
+      setChatProvider("");
+      setChatInput("");
+      navigateWorkspace("chat");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setChatHistoryLoading(false);
+    }
+  }
+
+  async function deleteChatConversation(conversationId) {
+    if (!window.confirm("Hapus percakapan dan catatan aktivitas agent ini?")) return;
+    try {
+      await request(`/api/assistant/conversations/${conversationId}`, { method: "DELETE" });
+      if (activeChatId === conversationId) resetChat();
+      await refreshChatConversations();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function updateChatAction(status, summary) {
+    if (!activeChatId || !chatActionId) return;
+    await updateAgentAction(activeChatId, chatActionId, status, summary);
+  }
+
+  async function updateAgentAction(conversationId, actionId, status, summary) {
+    const updatedAction = await request(`/api/assistant/conversations/${conversationId}/actions/${actionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, summary }),
+    });
+    setChatActions((actions) => actions.map((action) => (
+      action.id === updatedAction.id ? updatedAction : action
+    )));
+    await refreshChatConversations();
+  }
+
   useEffect(() => {
     refreshTodos(true);
+    refreshProjects();
     refreshNotifications();
     refreshAgentWorkspace();
+    refreshChatConversations();
     request("/api/assistant/providers")
       .then(setProviderStatus)
       .catch((err) => setError(err.message));
@@ -242,10 +439,20 @@ export default function App() {
   }, [todos]);
 
   const visibleTodos = useMemo(() => {
-    if (filter === "pending") return todos.filter((todo) => todo.status === "pending");
-    if (filter === "completed") return todos.filter((todo) => todo.status === "completed");
-    return todos;
-  }, [filter, todos]);
+    const query = taskSearch.trim().toLocaleLowerCase();
+    return todos.filter((todo) => {
+      if (filter === "pending" && todo.status !== "pending") return false;
+      if (filter === "completed" && todo.status !== "completed") return false;
+      if (projectFilter === "none" && todo.project_id !== null) return false;
+      if (projectFilter !== "all" && projectFilter !== "none" && String(todo.project_id) !== projectFilter) return false;
+      if (priorityFilter !== "all" && todo.priority !== priorityFilter) return false;
+      if (dueFilter === "overdue" && !isOverdue(todo)) return false;
+      if (dueFilter === "scheduled" && !todo.due_at) return false;
+      if (dueFilter === "unscheduled" && todo.due_at) return false;
+      if (query && !`${todo.title} ${todo.notes || ""}`.toLocaleLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [dueFilter, filter, priorityFilter, projectFilter, taskSearch, todos]);
   const providerNameById = Object.fromEntries(
     (providerStatus?.providers || []).map((provider) => [provider.id, provider.name]),
   );
@@ -274,6 +481,8 @@ export default function App() {
       const payload = {
         title: form.title,
         notes: form.notes || null,
+        project_id: form.project_id ? Number(form.project_id) : null,
+        priority: form.priority,
         due_at: form.due_at ? new Date(form.due_at).toISOString() : null,
         reminder_at: form.reminder_at ? new Date(form.reminder_at).toISOString() : null,
       };
@@ -328,15 +537,29 @@ export default function App() {
     try {
       const response = await request("/api/assistant/chat", {
         method: "POST",
-        body: JSON.stringify({ messages, timezone }),
+        body: JSON.stringify({
+          messages,
+          timezone,
+          ...(activeChatId ? { conversation_id: activeChatId } : {}),
+        }),
       });
+      setActiveChatId(response.conversation_id);
       setChatMessages([
         ...messages,
-        { role: "assistant", content: response.reply },
+        {
+          role: "assistant",
+          content: response.reply,
+          todo_proposal: response.todo_proposal,
+          tool_proposal: response.tool_proposal,
+          action_id: response.action_id,
+        },
       ].slice(-16));
       setChatTodoProposal(response.todo_proposal);
       setChatToolProposal(response.tool_proposal);
+      setChatActionId(response.action_id);
       setChatProvider(`${providerNameById[response.provider] || response.provider} · ${response.model}`);
+      await refreshChatConversations();
+      await refreshActiveChatActions(response.conversation_id);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -349,7 +572,12 @@ export default function App() {
     if (!window.confirm(`Simpan draft "${chatTodoProposal.title}" sebagai tugas?`)) return;
     setChatActionLoading(true);
     setError("");
+    let actionApproved = false;
     try {
+      if (chatActionId) {
+        await updateChatAction("approved", chatTodoProposal.title);
+        actionApproved = true;
+      }
       await request("/api/todos", {
         method: "POST",
         body: JSON.stringify({
@@ -363,13 +591,41 @@ export default function App() {
             : null,
         }),
       });
+      if (chatActionId) await updateChatAction("completed", `Tugas disimpan: ${chatTodoProposal.title}`);
       setChatTodoProposal(null);
+      setChatActionId(null);
+      await refreshActiveChatActions();
+      const completionMessage = "Tugas berhasil disimpan setelah konfirmasi kamu.";
       setChatMessages((messages) => [
         ...messages,
-        { role: "assistant", content: "Tugas berhasil disimpan setelah konfirmasi kamu." },
+        { role: "assistant", content: completionMessage },
       ].slice(-16));
+      await persistAssistantMessage(completionMessage);
       setNotice("Draft chat dikonfirmasi dan disimpan sebagai tugas.");
       await refreshTodos();
+    } catch (err) {
+      if (chatActionId && actionApproved) {
+        try {
+          await updateChatAction("failed", `Penyimpanan tugas gagal: ${err.message}`);
+        } catch (actionError) {
+          setError(`${err.message}; status aktivitas juga gagal disimpan: ${actionError.message}`);
+        }
+      }
+      setError(err.message);
+    } finally {
+      setChatActionLoading(false);
+    }
+  }
+
+  async function rejectChatAction() {
+    if (chatActionLoading || chatToolLoading) return;
+    setChatActionLoading(true);
+    setError("");
+    try {
+      if (chatActionId) await updateChatAction("rejected", "Usulan ditolak pengguna.");
+      setChatTodoProposal(null);
+      setChatToolProposal(null);
+      setChatActionId(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -380,6 +636,9 @@ export default function App() {
   function resetChat() {
     if (chatLoading || chatActionLoading || chatToolLoading) return;
     setChatMessages(initialChatMessages);
+    setActiveChatId(null);
+    setChatActions([]);
+    setChatActionId(null);
     setChatInput("");
     setChatTodoProposal(null);
     setChatToolProposal(null);
@@ -565,69 +824,143 @@ export default function App() {
     }
   }
 
-  async function runChatSecurityScan(recordUserMessage = true) {
+  async function runChatSecurityScan(recordUserMessage = true, approvedActionId = null) {
     if (chatToolLoading || chatLoading || chatActionLoading) return;
+    const userMessage = "Jalankan analisis keamanan lokal pada project.";
+    let conversationId = activeChatId;
+    let actionId = approvedActionId;
     if (recordUserMessage) {
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "user", content: "Jalankan analisis keamanan lokal pada project." },
-      ].slice(-16));
+      try {
+        const isNewConversation = !conversationId;
+        conversationId = await ensureChatConversation(userMessage);
+        actionId = await recordAgentAction(
+          conversationId,
+          "local_security_scan",
+          "Scan keamanan read-only pada project lokal.",
+        );
+        if (!isNewConversation) {
+          setChatMessages((messages) => [
+            ...messages,
+            { role: "user", content: userMessage },
+          ].slice(-16));
+        }
+      } catch (err) {
+        setError(err.message);
+        return false;
+      }
     }
+    if (actionId) setChatActionId(actionId);
     setChatToolLoading(true);
     setChatToolStatus("Memeriksa source project secara lokal…");
     setError("");
+    let result;
     try {
-      const result = await request("/api/agent/security-scan", { method: "POST" });
-      setSecurityScan(result);
-      const summary = result.findings.length
-        ? `Analisis lokal selesai: ${result.scanned_files} file diperiksa. Ada ${result.high_count} temuan prioritas tinggi, ${result.medium_count} perlu review, dan ${result.low_count} rendah.`
-        : `Analisis lokal selesai: ${result.scanned_files} file diperiksa dan tidak ada pola berisiko yang terdeteksi. Hasil bersih bukan jaminan keamanan.`;
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "assistant", content: summary, securityScan: result },
-      ].slice(-16));
+      result = await request("/api/agent/security-scan", { method: "POST" });
     } catch (err) {
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "assistant", content: `Analisis lokal gagal: ${err.message}` },
-      ].slice(-16));
+      const failureMessage = `Analisis lokal gagal: ${err.message}`;
+      setChatMessages((messages) => [...messages, { role: "assistant", content: failureMessage }].slice(-16));
+      await persistAssistantMessage(failureMessage, {}, conversationId);
+      if (actionId) {
+        try {
+          await updateAgentAction(conversationId, actionId, "failed", failureMessage);
+        } catch (actionError) {
+          setError(`${failureMessage}; status aktivitas gagal disimpan: ${actionError.message}`);
+        }
+        setChatActionId(null);
+      }
+      return false;
     } finally {
       setChatToolLoading(false);
       setChatToolStatus("");
     }
+    setSecurityScan(result);
+    const summary = result.findings.length
+      ? `Analisis lokal selesai: ${result.scanned_files} file diperiksa. Ada ${result.high_count} temuan prioritas tinggi, ${result.medium_count} perlu review, dan ${result.low_count} rendah.`
+      : `Analisis lokal selesai: ${result.scanned_files} file diperiksa dan tidak ada pola berisiko yang terdeteksi. Hasil bersih bukan jaminan keamanan.`;
+    setChatMessages((messages) => [
+      ...messages,
+      { role: "assistant", content: summary, securityScan: result },
+    ].slice(-16));
+    await persistAssistantMessage(summary, { security_scan: result }, conversationId);
+    if (actionId) {
+      try {
+        await updateAgentAction(conversationId, actionId, "completed", summary);
+      } catch (err) {
+        setError(`Scan selesai, tetapi status aktivitas gagal disimpan: ${err.message}`);
+      }
+      setChatActionId(null);
+    }
+    return true;
   }
 
-  async function runChatWebResearch(queryText = chatInput, recordUserMessage = true) {
+  async function runChatWebResearch(queryText = chatInput, recordUserMessage = true, approvedActionId = null) {
     const query = queryText.trim();
     if (query.length < 3 || chatToolLoading || chatLoading || chatActionLoading) return;
+    let conversationId = activeChatId;
+    let actionId = approvedActionId;
     if (recordUserMessage) {
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "user", content: query },
-      ].slice(-16));
+      try {
+        const isNewConversation = !conversationId;
+        conversationId = await ensureChatConversation(query);
+        actionId = await recordAgentAction(
+          conversationId,
+          "public_web_research",
+          "Riset web publik yang diminta pengguna.",
+          query,
+        );
+        if (!isNewConversation) {
+          setChatMessages((messages) => [
+            ...messages,
+            { role: "user", content: query },
+          ].slice(-16));
+        }
+      } catch (err) {
+        setError(err.message);
+        return false;
+      }
       setChatInput("");
     }
+    if (actionId) setChatActionId(actionId);
     setChatToolLoading(true);
     setChatToolStatus("Mencari sumber publik dengan Google Search…");
     setError("");
+    let result;
     try {
-      const result = await request("/api/agent/research", {
+      result = await request("/api/agent/research", {
         method: "POST",
         body: JSON.stringify({ query }),
       });
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "assistant", content: result.answer, webResearch: result },
-      ].slice(-16));
     } catch (err) {
-      setChatMessages((messages) => [
-        ...messages,
-        { role: "assistant", content: `Riset web gagal: ${err.message}` },
-      ].slice(-16));
+      const failureMessage = `Riset web gagal: ${err.message}`;
+      setChatMessages((messages) => [...messages, { role: "assistant", content: failureMessage }].slice(-16));
+      await persistAssistantMessage(failureMessage, {}, conversationId);
+      if (actionId) {
+        try {
+          await updateAgentAction(conversationId, actionId, "failed", failureMessage);
+        } catch (actionError) {
+          setError(`${failureMessage}; status aktivitas gagal disimpan: ${actionError.message}`);
+        }
+        setChatActionId(null);
+      }
+      return false;
     } finally {
       setChatToolLoading(false);
       setChatToolStatus("");
     }
+    setChatMessages((messages) => [
+      ...messages,
+      { role: "assistant", content: result.answer, webResearch: result },
+    ].slice(-16));
+    await persistAssistantMessage(result.answer, { web_research: result }, conversationId);
+    if (actionId) {
+      try {
+        await updateAgentAction(conversationId, actionId, "completed", result.answer.slice(0, 1000));
+      } catch (err) {
+        setError(`Riset selesai, tetapi status aktivitas gagal disimpan: ${err.message}`);
+      }
+      setChatActionId(null);
+    }
+    return true;
   }
 
   async function approveChatToolProposal() {
@@ -640,11 +973,20 @@ export default function App() {
         : "Jalankan scan keamanan read-only pada source project lokal? Source tidak dikirim ke AI.",
     );
     if (!approved) return;
-    setChatToolProposal(null);
-    if (isResearch) {
-      await runChatWebResearch(proposal.query, false);
-    } else {
-      await runChatSecurityScan(false);
+    setChatActionLoading(true);
+    setError("");
+    try {
+      await updateChatAction("approved", proposal.reason);
+      setChatToolProposal(null);
+      setChatActionLoading(false);
+      if (isResearch) {
+        await runChatWebResearch(proposal.query, false, chatActionId);
+      } else {
+        await runChatSecurityScan(false, chatActionId);
+      }
+    } catch (err) {
+      setError(err.message);
+      setChatActionLoading(false);
     }
   }
 
@@ -655,6 +997,8 @@ export default function App() {
       notes: todo.notes || "",
       due_at: localDateTimeValue(todo.due_at),
       reminder_at: localDateTimeValue(todo.reminder_at),
+      project_id: todo.project_id ? String(todo.project_id) : "",
+      priority: todo.priority || "normal",
     });
     document.getElementById("task-title")?.focus();
   }
@@ -723,10 +1067,47 @@ export default function App() {
           className="new-chat-button"
           type="button"
           onClick={startNewChat}
-          disabled={chatLoading || chatActionLoading || chatToolLoading}
+          disabled={chatLoading || chatActionLoading || chatToolLoading || chatHistoryLoading}
         >
           <span>＋</span> Chat baru
         </button>
+        <div className="chat-history">
+          <div className="sidebar-section-label">RIWAYAT CHAT</div>
+          {chatConversations.length ? (
+            <div className="chat-history-list">
+              {chatConversations.map((conversation) => (
+                <div
+                  className={`chat-history-item ${activeChatId === conversation.id ? "active" : ""}`}
+                  key={conversation.id}
+                >
+                  <button
+                    className="chat-history-open"
+                    type="button"
+                    onClick={() => openChatConversation(conversation.id)}
+                    disabled={chatHistoryLoading || chatLoading || chatActionLoading || chatToolLoading}
+                    title={conversation.last_message}
+                  >
+                    <strong>{conversation.title}</strong>
+                    <small>{conversation.message_count} pesan</small>
+                  </button>
+                  <button
+                    className="chat-history-delete"
+                    type="button"
+                    aria-label={`Hapus percakapan ${conversation.title}`}
+                    onClick={() => deleteChatConversation(conversation.id)}
+                    disabled={chatHistoryLoading || chatLoading || chatActionLoading || chatToolLoading}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="chat-history-empty">
+              {chatHistoryLoading ? "Memuat riwayat..." : "Belum ada percakapan tersimpan."}
+            </p>
+          )}
+        </div>
         <div className="sidebar-section-label">AGENT</div>
         <nav className="workspace-nav" aria-label="Navigasi workspace">
           <button
@@ -1004,8 +1385,8 @@ export default function App() {
                   <button
                     className="cancel-button"
                     type="button"
-                    onClick={() => setChatToolProposal(null)}
-                    disabled={chatToolLoading}
+                    onClick={rejectChatAction}
+                    disabled={chatToolLoading || chatActionLoading}
                   >
                     Tolak
                   </button>
@@ -1020,6 +1401,20 @@ export default function App() {
                 </div>
               </div>
               )}
+              {chatActions.length > 0 && (
+                <section className="chat-activity-log" aria-label="Riwayat aktivitas agent">
+                  <span className="eyebrow">AKTIVITAS AGENT</span>
+                  {chatActions.slice().reverse().map((action) => (
+                    <div className="chat-activity-row" key={action.id}>
+                      <span className={`chat-activity-status ${action.status}`}>{action.status}</span>
+                      <div>
+                        <strong>{action.summary}</strong>
+                        <small>{action.action_type.replaceAll("_", " ")}</small>
+                      </div>
+                    </div>
+                  ))}
+                </section>
+              )}
               {chatTodoProposal?.status === "ready" && (
               <div className="chat-tool-proposal">
                 <div>
@@ -1033,7 +1428,7 @@ export default function App() {
                   <button
                     className="cancel-button"
                     type="button"
-                    onClick={() => setChatTodoProposal(null)}
+                    onClick={rejectChatAction}
                     disabled={chatActionLoading}
                   >
                     Tolak
@@ -1508,6 +1903,51 @@ export default function App() {
           )}
 
           {activePage === "tasks" && (
+          <>
+          <section className="project-manager-card">
+            <div className="section-heading">
+              <div>
+                <h2>Project</h2>
+                <p>Kelompokkan tugas berdasarkan pekerjaan yang sedang berjalan.</p>
+              </div>
+            </div>
+            <form className="project-create-form" onSubmit={createProject}>
+              <input
+                aria-label="Nama project baru"
+                value={newProjectName}
+                onChange={(event) => setNewProjectName(event.target.value)}
+                placeholder="Contoh: Website kampus"
+                maxLength={100}
+                required
+              />
+              <button className="submit-button" type="submit" disabled={projectSaving}>
+                {projectSaving ? "Membuat..." : "Buat project"}
+              </button>
+            </form>
+            <div className="project-list">
+              <button
+                type="button"
+                className={`project-chip ${projectFilter === "all" ? "selected" : ""}`}
+                onClick={() => setProjectFilter("all")}
+              >Semua tugas</button>
+              {projects.map((project) => (
+                <div className="project-chip-wrap" key={project.id}>
+                  <button
+                    type="button"
+                    className={`project-chip ${projectFilter === String(project.id) ? "selected" : ""}`}
+                    onClick={() => setProjectFilter(String(project.id))}
+                  >{project.name}</button>
+                  <button type="button" onClick={() => renameProject(project)} aria-label={`Ubah nama ${project.name}`} title="Ubah nama">✎</button>
+                  <button type="button" onClick={() => deleteProject(project)} aria-label={`Hapus ${project.name}`} title="Hapus">×</button>
+                </div>
+              ))}
+              <button
+                type="button"
+                className={`project-chip ${projectFilter === "none" ? "selected" : ""}`}
+                onClick={() => setProjectFilter("none")}
+              >Tanpa project</button>
+            </div>
+          </section>
           <div className="workspace-grid">
             <section className="task-section">
               <div className="section-heading">
@@ -1535,6 +1975,33 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="task-filter-controls">
+                <input
+                  type="search"
+                  aria-label="Cari tugas"
+                  placeholder="Cari nama atau catatan tugas"
+                  value={taskSearch}
+                  onChange={(event) => setTaskSearch(event.target.value)}
+                />
+                <select aria-label="Filter project" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}>
+                  <option value="all">Semua project</option>
+                  <option value="none">Tanpa project</option>
+                  {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+                </select>
+                <select aria-label="Filter prioritas" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value)}>
+                  <option value="all">Semua prioritas</option>
+                  <option value="high">Tinggi</option>
+                  <option value="normal">Normal</option>
+                  <option value="low">Rendah</option>
+                </select>
+                <select aria-label="Filter tenggat" value={dueFilter} onChange={(event) => setDueFilter(event.target.value)}>
+                  <option value="all">Semua tenggat</option>
+                  <option value="overdue">Terlambat</option>
+                  <option value="scheduled">Ada tenggat</option>
+                  <option value="unscheduled">Tanpa tenggat</option>
+                </select>
+              </div>
+
               <div className="task-list">
                 {loading ? (
                   <div className="empty-state"><span className="spinner" />Memuat tugas...</div>
@@ -1552,6 +2019,12 @@ export default function App() {
                       <div className="task-copy">
                         <h3>{todo.title}</h3>
                         {todo.notes && <p>{todo.notes}</p>}
+                        <div className="task-metadata">
+                          <span className={`priority-label priority-${todo.priority || "normal"}`}>
+                            Prioritas {todo.priority === "high" ? "tinggi" : todo.priority === "low" ? "rendah" : "normal"}
+                          </span>
+                          {todo.project_id && <span>{projects.find((project) => project.id === todo.project_id)?.name}</span>}
+                        </div>
                         {todo.due_at && (
                           <div className={`due-label ${isOverdue(todo) ? "overdue" : ""}`}>
                             <span>◷</span> Tenggat {formatDue(todo.due_at)}
@@ -1610,6 +2083,17 @@ export default function App() {
                   rows={3}
                   maxLength={5000}
                 />
+                <label htmlFor="task-project">Project <small>OPSIONAL</small></label>
+                <select id="task-project" name="project_id" value={form.project_id} onChange={updateForm}>
+                  <option value="">Tanpa project</option>
+                  {projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}
+                </select>
+                <label htmlFor="task-priority">Prioritas</label>
+                <select id="task-priority" name="priority" value={form.priority} onChange={updateForm}>
+                  <option value="high">Tinggi</option>
+                  <option value="normal">Normal</option>
+                  <option value="low">Rendah</option>
+                </select>
                 <label htmlFor="task-due">Tenggat tugas <small>OPSIONAL</small></label>
                 <input
                   id="task-due"
@@ -1637,6 +2121,7 @@ export default function App() {
               </form>
             </aside>
           </div>
+          </>
           )}
 
           {activePage !== "chat" && (
