@@ -60,7 +60,7 @@ function formatDue(value) {
 function parseWebsiteTarget(value) {
   const input = value.trim();
   const scheme = input.match(/^([a-z][a-z\d+.-]*):\/\//i)?.[1]?.toLowerCase();
-  if (scheme && scheme !== "https") {
+  if (scheme && scheme !== "https") {x``
     throw new Error("Gunakan URL HTTPS publik");
   }
   let url;
